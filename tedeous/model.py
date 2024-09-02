@@ -21,7 +21,8 @@ class Model():
             net: Union[torch.nn.Module, torch.Tensor],
             domain: Domain,
             equation: Equation,
-            conditions: Conditions):
+            conditions: Conditions,
+            use_kernel: bool = False):
         """
         Args:
             net (Union[torch.nn.Module, torch.Tensor]): neural network or torch.Tensor for mode *mat*
@@ -41,6 +42,7 @@ class Model():
         else:
             os.makedirs(folder_path)
         self._save_dir = folder_path
+        self.use_kernel = use_kernel
 
     def compile(
             self,
@@ -90,7 +92,7 @@ class Model():
                                                    boundary_order=boundary_order).set_strategy(mode)
         
         self.solution_cls = Solution(grid, self.equation_cls, self.net, mode, weak_form,
-                                     lambda_operator, lambda_bound, tol, derivative_points)
+                                     lambda_operator, lambda_bound, tol, derivative_points, self.use_kernel)
 
     def _model_save(
         self,
@@ -176,5 +178,29 @@ class Model():
 
         self._model_save(save_model, model_name)
 
+class KenelModel():
+    def __init__(self, parent_model):
+        super(KenelModel, self).__init__()
+        # Initialize the child model with the parent model's parameters
+        self.parent_model = parent_model
+        self.model = self.parent_model.net
+        self.kernel_function = self.parent_model.solution_cls.loss_cls.kernel_function
+        self.kernel_model = self.parent_model.solution_cls.loss_cls.kernel_model
+        self.n_coefsv = self.parent_model.solution_cls.loss_cls.kernel_model.coeffs
+        
+    def forward(self, x):
+        # change forward here
+        kernel_function_output = self.kernel_function(x)
+        kernel_function_output_size = kernel_function_output.size()
+        kernel_function_output = kernel_function_output.reshape(-1)
+        size_no_pad = len(kernel_function_output)
+        kernel_function_output_pad = torch.cat((kernel_function_output, torch.ones(len(self.n_coefsv)-len(kernel_function_output))))
+        kernel_function_output_matrix = torch.tile(kernel_function_output_pad, (len(kernel_function_output_pad), 1))
+        kernel_model_ouput = self.kernel_model.predict(kernel_function_output_matrix)
+        output = kernel_model_ouput[:size_no_pad].reshape(kernel_function_output_size)
+        return output
+    
+    def __call__(self, x):
+        return self.forward(x)
 
         

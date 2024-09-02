@@ -163,7 +163,7 @@ class Operator():
                 op_list.append(self.apply_operator(
                     self.prepared_operator[i], self.sorted_grid).reshape(-1,1))
             op = torch.cat(op_list, 1)
-        op = torch.tensor(1 + np.random.normal(0, 0.3, len(self.sorted_grid)), dtype=torch.float32).reshape(-1,1)
+        op = torch.tensor(np.array([1,1]) + np.random.normal(0, 0.3, (len(self.sorted_grid), 2)), dtype=torch.float32)
         return op
 
 

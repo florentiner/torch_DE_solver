@@ -111,7 +111,7 @@ net = torch.nn.Sequential(
     torch.nn.Linear(100, 2)
 )
 
-model =  Model(net, domain, equation, boundaries)
+model =  Model(net, domain, equation, boundaries, use_kernel=True)
 
 model.compile("NN", lambda_operator=1, lambda_bound=100, h=h)
 

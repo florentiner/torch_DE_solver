@@ -30,7 +30,8 @@ class Solution():
         lambda_operator,
         lambda_bound,
         tol: float = 0,
-        derivative_points: int = 2):
+        derivative_points: int = 2,
+        use_kernel: bool = False):
         """
         Args:
             grid (torch.Tensor): discretization of comp-l domain.
@@ -57,6 +58,16 @@ class Solution():
         prepared_operator = equal_copy.operator_prepare()
         self._operator_coeff(equal_cls, prepared_operator)
         self.prepared_bconds = equal_copy.bnd_prepare()
+        self.use_kernel = use_kernel
+        self.bound_points = None
+        # if self.use_kernel: # to compute grad to boundaries
+        #     for el in self.prepared_bconds:
+        #         el['bnd'] = el['bnd'].detach()
+        #         el['bnd'].requires_grad = True
+        #         self.bound_points = el['bnd'] if self.bound_points is None \
+        #             else torch.cat((self.bound_points, el['bnd']))
+        #         el['bval'] = el['bval'].detach()
+        #         el['bval'].requires_grad = True
         self.model = model.to(device_type())
         self.mode = mode
         self.weak_form = weak_form
@@ -67,11 +78,11 @@ class Solution():
 
         self.operator = Operator(self.grid, prepared_operator, self.model,
                                    self.mode, weak_form, derivative_points)
-        self.boundary = Bounds(self.grid,self.prepared_bconds, self.model,
+        self.boundary = Bounds(self.grid, self.prepared_bconds, self.model,
                                    self.mode, weak_form, derivative_points)
 
         self.loss_cls = Losses(self.mode, self.weak_form, self.n_t, self.tol,
-                               self.model, self.grid)
+                               self.model, self.grid, self.use_kernel)
         self.op_list = []
         self.bval_list = []
         self.loss_list = []

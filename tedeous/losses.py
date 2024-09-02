@@ -5,7 +5,8 @@ import numpy as np
 import torch
 
 from tedeous.input_preprocessing import lambda_prepare
-from tedeous.derivative import Derivative_autograd
+from tedeous.derivative import Derivative_autograd, Derivative
+from tedeous.eval import Operator
 import torch.nn as nn
 from sklearn.kernel_ridge import KernelRidge
 
@@ -52,6 +53,7 @@ class KernelRidge_(nn.Module):
 
         # Predict using the learned coefficients and the kernel
         predictions = X @ self.coeffs
+        # predictions = X @ self.coeffs
 
         return predictions
 
@@ -95,7 +97,8 @@ class Losses():
                  n_t: int,
                  tol: Union[int, float],
                  model: Union[torch.nn.Sequential, torch.Tensor],
-                 grid: torch.Tensor):
+                 grid: torch.Tensor,
+                 use_kernel: bool):
         """
         Args:
             mode (str): calculation mode, *NN, autograd, mat*.
@@ -111,7 +114,8 @@ class Losses():
         self.model = model
         self.grad = Derivative_autograd(self.model)
         self.grid = grid
-        self.kernal_ready = False
+        self.kernel_ready = False
+        self.use_kernel = use_kernel
         # TODO: refactor loss_op, loss_bcs into one function, carefully figure out when bval
         # is None + fix causal_loss operator crutch (line 76).
 
@@ -205,7 +209,7 @@ class Losses():
             del loss
             torch.cuda.empty_cache()
             loss = temp_loss
-
+        
         return loss, loss_normalized
 
     def _causal_loss(self,
@@ -285,9 +289,9 @@ class Losses():
         with torch.no_grad():
             loss_normalized = op @ lambda_op_normalized.T +\
                         bval_diff @ lambda_bound_normalized.T
-
+        
         return loss, loss_normalized
-    
+        
     def _kernel_loss_(self,
                   operator: torch.Tensor,
                   bval: torch.Tensor,
@@ -308,27 +312,42 @@ class Losses():
             loss (torch.Tensor): loss.
             loss_normalized (torch.Tensor): loss, where regularization parameters are 1.
         """
-        f_x = self.model(self.grid)
-        d_dx_2_f_x = self.grad._nn_autograd(
-                    self.model, self.grid, 0, axis=[0,0])
+        f_x = lambda points: self.model(points)#self.grid
+        d_dx_2_f_x = lambda points: self.grad._nn_autograd(
+                    self.model, points, 0, [0,0]) #self.grid
         lambda_n, mu_n = 1, 1
-        n = len(self.grid)
-        # lambda_n, mu_n = np.log(n)/n, 1/np.log(n)
-        kernul_function = lambda_n * d_dx_2_f_x + mu_n * d_dx_2_f_x + lambda_n * f_x
-        kernul_function = kernul_function.reshape(-1)
-        kernul_matrix = torch.tile(kernul_function, (n, 1))
+        self.kernel_function = lambda points: lambda_n * d_dx_2_f_x(points) + mu_n * d_dx_2_f_x(points) + lambda_n * f_x(points)
+        kernel_function_x = self.kernel_function(self.grid)
+        kernel_function_x_orig_size = kernel_function_x.size()
+        kernel_function_x = kernel_function_x.reshape(-1)
+        kernel_x_matrix = torch.tile(kernel_function_x, (len(kernel_function_x), 1))
+        operator_orig_size = operator.size()
+        operator = operator.reshape(-1, 1)
         with torch.no_grad():
-            if not self.kernal_ready:
-                krr = KernelRidge(alpha=n, kernel = 'precomputed')
-                krr.fit(kernul_matrix, operator)
-                self.kernal_ready = True
-                self.kernal_coeff = torch.from_numpy(krr.dual_coef_).reshape(-1)
+            if not self.kernel_ready:
+                kernel_model = KernelRidge_(alpha=len(operator))
+                kernel_model.fit(kernel_x_matrix, operator)
+                self.kernel_ready = True
+                self.kernel_model = kernel_model
         
-        kernal_res = self.kernal_coeff @ kernul_matrix
-        loss = torch.sum(torch.square(kernal_res - operator))/len(kernal_res)
-        if loss < 80:
-            print(torch.mean(abs(kernal_res - 1)))
-        return loss, loss
+        kernel_res = self.kernel_model.predict(kernel_x_matrix)
+        kernel_res = kernel_res.reshape(kernel_function_x_orig_size)
+        operator = operator.reshape(operator_orig_size)
+        operator_diff = kernel_res - operator
+        operator_diff = operator_diff * lambda_op
+        loss_oper = torch.norm(operator_diff, p=2)
+        loss_bnd, bval_diff = self._loss_bcs(bval, true_bval, lambda_bound)
+        loss = loss_oper + loss_bnd
+
+        lambda_op_normalized = lambda_prepare(operator, 1)
+        lambda_bound_normalized = lambda_prepare(bval, 1)
+        with torch.no_grad():
+            loss_normalized = torch.mean(operator_diff**2, 0) @ lambda_op_normalized.T +\
+                        bval_diff @ lambda_bound_normalized.T
+        dif = torch.mean(abs(kernel_res - 1))
+        print(dif)
+
+        return loss, loss_normalized
         
 
     def compute(self,
@@ -358,7 +377,8 @@ class Losses():
                 print('No bconds is not possible, returning infinite loss')
                 return np.inf
         inputs = [operator, bval, true_bval, lambda_op, lambda_bound]
-        return self._kernel_loss_(*inputs)
+        if self.use_kernel:
+            return self._kernel_loss_(*inputs)
         if self.weak_form is not None and self.weak_form != []:
             return self._weak_loss(*inputs)
         elif self.tol != 0:
