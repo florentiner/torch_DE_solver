@@ -70,7 +70,8 @@ class Solution():
         self.boundary = Bounds(self.grid,self.prepared_bconds, self.model,
                                    self.mode, weak_form, derivative_points)
 
-        self.loss_cls = Losses(self.mode, self.weak_form, self.n_t, self.tol)
+        self.loss_cls = Losses(self.mode, self.weak_form, self.n_t, self.tol,
+                               self.model, self.grid)
         self.op_list = []
         self.bval_list = []
         self.loss_list = []

@@ -114,8 +114,8 @@ cb_es = early_stopping.EarlyStopping(eps=1e-7,
                                      info_string_every=1000,
                                      randomize_parameter=1e-5)
 
-cb_plots = plot.Plots(save_every=1000, print_every=None, img_dir=img_dir)
+cb_plots = plot.Plots(save_every=1000, print_every=None, img_dir=None)
 
 optimizer = Optimizer('Adam', {'lr': 1e-3}, gamma=0.9, decay_every=1000)
 
-model.train(optimizer, 1e5, save_model=True, callbacks=[cb_cache, cb_es, cb_plots])
+model.train(optimizer, 1e5, save_model=False, callbacks=[cb_cache, cb_es, cb_plots])

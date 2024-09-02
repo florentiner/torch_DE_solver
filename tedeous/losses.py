@@ -5,7 +5,85 @@ import numpy as np
 import torch
 
 from tedeous.input_preprocessing import lambda_prepare
+from tedeous.derivative import Derivative_autograd
+import torch.nn as nn
+from sklearn.kernel_ridge import KernelRidge
 
+def svd_lstsq(AA, BB, tol=1e-5):
+        U, S, Vh = torch.linalg.svd(AA, full_matrices=False)
+        Spinv = torch.zeros_like(S)
+        Spinv[S>tol] = 1/S[S>tol]
+        UhBB = U.adjoint() @ BB
+        if Spinv.ndim!=UhBB.ndim:
+            Spinv = Spinv.unsqueeze(-1)
+        SpinvUhBB = Spinv * UhBB
+        return Vh.adjoint() @ SpinvUhBB
+
+class KernelRidge_(nn.Module):
+    """
+    Kernel Ridge Regression model implemented in PyTorch with fit and predict methods.
+
+    Args:
+        kernel (str): The kernel function to use. Available options:
+            - 'linear': Linear kernel
+            - 'rbf': Radial basis function (Gaussian) kernel
+        gamma (float, optional): Kernel parameter for RBF kernel. Defaults to None.
+        alpha (float): Regularization parameter.
+        device (str, optional): Device to use for computations. Defaults to 'cpu'.
+    """
+    def __init__(self, alpha=1e-3):
+        super(KernelRidge_, self).__init__()
+        self.alpha = alpha
+        self.coeffs = None  # Store the learned coefficients
+
+    def forward(self, X):
+        """
+        Computes the Kernel Ridge Regression prediction.
+
+        Args:
+            X (torch.Tensor): Input features.
+
+        Returns:
+            torch.Tensor: Predictions.
+        """
+        if self.coeffs is None:
+            raise ValueError("Model must be fitted first.")
+        
+
+        # Predict using the learned coefficients and the kernel
+        predictions = X @ self.coeffs
+
+        return predictions
+
+    def fit(self, X, y):
+        """
+        Fits the Kernel Ridge Regression model to the data.
+
+        Args:
+            X (torch.Tensor): Input features.
+            y (torch.Tensor): Target values.
+        """
+
+        # Calculate the kernel matrix
+        K = X
+
+        # Add regularization term to the kernel matrix
+        K_reg = K + self.alpha * torch.eye(K.shape[0])
+
+        # Solve for the coefficients using the closed-form solution
+        self.coeffs = svd_lstsq(K_reg, y)
+
+    def predict(self, X):
+        """
+        Makes predictions on new data.
+
+        Args:
+            X (torch.Tensor): Input features.
+
+        Returns:
+            torch.Tensor: Predictions.
+        """
+        return self.forward(X)
 
 class Losses():
     """
@@ -15,7 +93,9 @@ class Losses():
                  mode: str,
                  weak_form: Union[None, list],
                  n_t: int,
-                 tol: Union[int, float]):
+                 tol: Union[int, float],
+                 model: Union[torch.nn.Sequential, torch.Tensor],
+                 grid: torch.Tensor):
         """
         Args:
             mode (str): calculation mode, *NN, autograd, mat*.
@@ -28,6 +108,10 @@ class Losses():
         self.weak_form = weak_form
         self.n_t = n_t
         self.tol = tol
+        self.model = model
+        self.grad = Derivative_autograd(self.model)
+        self.grid = grid
+        self.kernal_ready = False
         # TODO: refactor loss_op, loss_bcs into one function, carefully figure out when bval
         # is None + fix causal_loss operator crutch (line 76).
 
@@ -153,7 +237,6 @@ class Losses():
         m = torch.triu(torch.ones((self.n_t, self.n_t), dtype=res.dtype), diagonal=1).T
         with torch.no_grad():
             w = torch.exp(- self.tol * (m @ res))
-
         loss_oper = torch.mean(w * res)
 
         loss_bnd, bval_diff = self._loss_bcs(bval, true_bval, lambda_bound)
@@ -204,6 +287,49 @@ class Losses():
                         bval_diff @ lambda_bound_normalized.T
 
         return loss, loss_normalized
+    
+    def _kernel_loss_(self,
+                  operator: torch.Tensor,
+                  bval: torch.Tensor,
+                  true_bval: torch.Tensor,
+                  lambda_op: torch.Tensor,
+                  lambda_bound: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """ Weak solution of O/PDE problem.
+
+        Args:
+            operator (torch.Tensor): operator calc-n result.
+            For more details to eval module -> operator_compute().
+            bval (torch.Tensor): calculated values of boundary conditions.
+            true_bval (torch.Tensor): true values of boundary conditions.
+            lambda_op (torch.Tensor): regularization parameter for operator term in loss.
+            lambda_bound (torch.Tensor): regularization parameter for boundary term in loss.
+
+        Returns:
+            loss (torch.Tensor): loss.
+            loss_normalized (torch.Tensor): loss, where regularization parameters are 1.
+        """
+        f_x = self.model(self.grid)
+        d_dx_2_f_x = self.grad._nn_autograd(
+                    self.model, self.grid, 0, axis=[0,0])
+        lambda_n, mu_n = 1, 1
+        n = len(self.grid)
+        # lambda_n, mu_n = np.log(n)/n, 1/np.log(n)
+        kernul_function = lambda_n * d_dx_2_f_x + mu_n * d_dx_2_f_x + lambda_n * f_x
+        kernul_function = kernul_function.reshape(-1)
+        kernul_matrix = torch.tile(kernul_function, (n, 1))
+        with torch.no_grad():
+            if not self.kernal_ready:
+                krr = KernelRidge(alpha=n, kernel = 'precomputed')
+                krr.fit(kernul_matrix, operator)
+                self.kernal_ready = True
+                self.kernal_coeff = torch.from_numpy(krr.dual_coef_).reshape(-1)
+        
+        kernal_res = self.kernal_coeff @ kernul_matrix
+        loss = torch.sum(torch.square(kernal_res - operator))/len(kernal_res)
+        if loss < 80:
+            print(torch.mean(abs(kernal_res - 1)))
+        return loss, loss
+        
 
     def compute(self,
                 operator: torch.Tensor,
@@ -232,7 +358,7 @@ class Losses():
                 print('No bconds is not possible, returning infinite loss')
                 return np.inf
         inputs = [operator, bval, true_bval, lambda_op, lambda_bound]
-
+        return self._kernel_loss_(*inputs)
         if self.weak_form is not None and self.weak_form != []:
             return self._weak_loss(*inputs)
         elif self.tol != 0:

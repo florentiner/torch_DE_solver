@@ -85,7 +85,7 @@ class Derivative_autograd(DerivativeInt):
             gradient_full (torch.Tensor): the result of desired function differentiation
                 in corresponding axis.
         """
-
+        points = points.detach()
         points.requires_grad = True
         fi = model(points)[:, var].sum(0)
         for ax in axis:

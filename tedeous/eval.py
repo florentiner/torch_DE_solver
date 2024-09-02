@@ -7,6 +7,7 @@ from tedeous.points_type import Points_type
 from tedeous.derivative import Derivative
 from tedeous.device import device_type, check_device
 from tedeous.utils import PadTransform
+import numpy as np
 
 
 def integration(func: torch.Tensor,
@@ -162,6 +163,7 @@ class Operator():
                 op_list.append(self.apply_operator(
                     self.prepared_operator[i], self.sorted_grid).reshape(-1,1))
             op = torch.cat(op_list, 1)
+        op = torch.tensor(1 + np.random.normal(0, 0.3, len(self.sorted_grid)), dtype=torch.float32).reshape(-1,1)
         return op
 
 
